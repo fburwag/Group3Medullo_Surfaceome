@@ -1,0 +1,91 @@
+---
+title: "MedulloTargetScoring"
+author: "Fares Burwag"
+date: "21/08/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+```
+
+To rank hits, we need to account for surface localization, dependency scores, and logFoldChange.
+
+One thing worth trying could be:
+* (SPC score (out of 4) + (# of dependent cell lines (out of 4)/2)) * log2FoldChange
+
+```{r}
+
+## LIMMA data from dataProcessingRMD.Rmd
+de_allhits_data <- read_rds("exportFiles_CSV/allHits_withImpwith2xNorm.rds")
+## DepMap score data from depMapAnalysisSurfaceome.Rmd
+depMapRanking_data <- read_rds("exportFiles_CSV/medulloDepMapRanking.rds")
+## SurfaceGenie score data from application GitHub source page
+surfaceGenieSPC_data <- read_csv("exportFiles_CSV/sGenieSPC.csv")
+
+```
+
+```{r}
+
+## Calculating a metric that accounts for CRISPR and RNAi effect scores. The score is a weighted average
+## that prioritizes the score with a lower standard deviation (based on 4 Gr3 cell line effect scores)
+
+weightedEffectScore_data <- depMapRanking_data %>%
+  group_by(symbol,OncotreeSubtype,OncotreeLineage,propCellLine_dependent) %>%
+  summarize(across(contains("gene_effect"), list(stdv = function(x) sd(x, na.rm = TRUE),
+                                                 mean = function(x) mean(x, na.rm = TRUE)))) %>%
+  mutate(effectScore = case_when(is.na(gene_effectCRISPR_mean) ~ gene_effectDEMETER_mean,
+                                 is.na(gene_effectDEMETER_mean) ~ gene_effectCRISPR_mean,
+                                 TRUE ~ (gene_effectDEMETER_mean*gene_effectCRISPR_stdv + gene_effectCRISPR_mean*gene_effectDEMETER_stdv)/(gene_effectCRISPR_stdv+gene_effectDEMETER_stdv)))
+
+## Combining surfaceGenie score, differential expression data, and DepMap scoring.
+combinedMetrics_data <-  de_allhits_data %>%
+  dplyr::rename(Accession = Row.names) %>%
+  dplyr::filter(subtype == "Group3", adj.P.Val <= 0.05) %>%
+  merge(weightedEffectScore_data[,c(1,4,6,8,9)], all = TRUE, by = "symbol") %>%
+  merge(surfaceGenieSPC_data, by = "Accession", all.x = TRUE) %>%
+  dplyr::select(-c(t, P.Value, B, subtype, Accession))
+
+## Replace NA's with 0 in numeric columns (propCellLine, Effect Score, and SPC)
+combinedMetrics_data$propCellLine_dependent <- replace(combinedMetrics_data$propCellLine_dependent,
+                                              which(is.na(combinedMetrics_data$propCellLine_dependent)),
+                                              0)
+combinedMetrics_data$effectScore <- replace(combinedMetrics_data$effectScore,
+                                              which(is.na(combinedMetrics_data$effectScore)),
+                                              0)
+combinedMetrics_data$SPC <- replace(combinedMetrics_data$SPC,
+                                              which(is.na(combinedMetrics_data$SPC)),
+                                              0)
+## Calculate rank score. The highest weight is assigned to logFoldChange, followed by surface 
+## score, and finally the weighted mean effect score
+combinedMetrics_data$rankScore<-combinedMetrics_data$logFC*(5+combinedMetrics_data$SPC-combinedMetrics_data$effectScore*2)
+
+## Only look into hits with surface score of at least 2, arrange based on decreasing score, 
+## and select desired columns.
+exportRankedHits <- combinedMetrics_data %>% arrange(desc(rankScore)) %>% 
+  dplyr::filter(SPC >= 2) %>%
+  dplyr::select(symbol, logFC, adj.P.Val, propCellLine_dependent, gene_effectCRISPR_mean,gene_effectDEMETER_mean,effectScore,SPC,rankScore)
+
+```
+
+
+
+```{r}
+
+## Export CSV file with final hits
+write_csv(file = "exportFiles_CSV/Group3_rankedHits.csv",x = exportRankedHits)
+
+```
+
+
+
+```{r}
+
+
+
+
+```
+
+
